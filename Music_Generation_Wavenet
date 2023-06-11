@@ -1,0 +1,372 @@
+# https://github.com/karthiknagarajansundar/automatic-music-generation/tree/main/Data
+#music encoding and decoding library
+!pip install music21
+from music21 import *
+
+#importing files into notebook
+from pathlib import Path
+import glob
+
+#for listing down the file names
+import os
+
+#Array Processing
+import numpy as np
+
+#importing library
+from collections import Counter
+
+#Fancy progress bar
+from tqdm.notebook import tqdm
+
+#Plots
+import matplotlib.pyplot as plt
+
+#splitting data into train and test
+from sklearn.model_selection import train_test_split
+
+# Keras
+import keras
+from keras.layers import *
+from keras.models import *
+from keras.callbacks import *
+import keras.backend as K
+from keras.utils import np_utils
+
+
+#read MIDI files return notes
+def read_midi(file):
+    print("Loading Music File:",file)
+    # initialize     
+    notes=[]
+    notes_to_parse = None
+    
+    #parsing a midi file - converting to music21 objects(Scores)
+    midi = converter.parse(file)
+  
+    #separate as instruments
+    s2 = instrument.partitionByInstrument(midi)
+
+    #Looping over all the instruments
+    for part in s2.parts:
+        #Piano and Guitar elements
+        if ('Piano' in str(part) or ('Guitar' in str(part))): 
+            notes_to_parse = part.recurse() 
+      
+            #note or chord
+            for element in notes_to_parse:
+                
+                #handling a note
+                if isinstance(element, note.Note):
+                    notes.append(str(element.pitch))
+                
+                #handling a chord
+                elif isinstance(element, chord.Chord):
+                    notes.append('.'.join(str(n) for n in element.normalOrder))
+
+    return np.array(notes)
+ 
+
+
+#folder path
+#folder = Path(r'metal_midi/').rglob('*.mid')
+folder = Path('./').rglob('*.mid')
+
+#separate to each notes/chords
+notes_2d = np.array([read_midi(file) for file in tqdm(folder)])  
+
+#2D to 1D 
+notes_1d = [ele for temp in notes_2d for ele in temp]
+
+#length of unique notes from entire list
+unique_notes = list(set(notes_1d))
+print(len(unique_notes))
+
+
+#frequency of each note
+freq = dict(Counter(notes_1d))
+n = [i for i in freq.values()]
+
+#plots
+plt.figure(figsize=(5,5))
+plt.hist(n)
+plt.xlabel('Notes')
+plt.ylabel('Frequency')
+plt.show()
+
+
+#taking only high frequency notes by setting threshold as 20
+frequent_notes = [i for i,count in freq.items() if count>=20]
+
+# initializing new music array with only high frequency notes
+new_music=[]
+for notes in notes_2d:
+    temp=[n for n in notes if n in frequent_notes]
+    new_music.append(temp)      
+
+new_music = np.array(new_music)
+
+# initializing inputs and outputs as notes
+n_ts = 32
+x = []
+y = []
+
+for n in new_music:
+    for i in range(0, len(n) - n_ts, 1):
+        
+        # inputs and outputs
+        Input = n[i:i + n_ts]
+        Output = n[i + n_ts]
+        x.append(Input)
+        y.append(Output)
+        
+x=np.array(x)
+print(x)
+y=np.array(y)
+print(y)
+
+
+# converting notes to ints
+unique_x = list(set(x.ravel()))
+x_note_to_int = dict((note_, number) for number, note_ in enumerate(unique_x))
+print(x_note_to_int)
+
+#input sequences for the network
+x_seq=[]
+for i in x:
+    temp=[]
+    for j in i:
+        # unique integer for every notes/chords
+        temp.append(x_note_to_int[j])
+    x_seq.append(temp)
+    
+x_seq = np.array(x_seq)
+
+
+#output sequences for the network
+unique_y = list(set(y))
+y_note_to_int = dict((note_, number) for number, note_ in enumerate(unique_y)) 
+y_seq=np.array([y_note_to_int[i] for i in y])
+
+# splitting data 80/20 train and val
+x_tr, x_val, y_tr, y_val = train_test_split(x_seq,y_seq,test_size=0.2,random_state=0)
+
+model = Sequential()
+
+#MODEL
+
+K.clear_session()
+
+    
+#embedding layer
+model.add(Embedding(len(unique_x), 100, input_length=32,trainable=True)) 
+
+model.add(Conv1D(512,3, padding='causal',activation='relu'))
+model.add(Dropout(0.2))
+model.add(MaxPool1D(2))
+    
+model.add(Conv1D(128,3,activation='relu',dilation_rate=2,padding='causal'))
+model.add(Dropout(0.2))
+model.add(MaxPool1D(2))
+
+model.add(Conv1D(16,3,activation='relu',dilation_rate=4,padding='causal'))
+model.add(Dropout(0.2))
+model.add(MaxPool1D(2))
+          
+#model.add(Conv1D(256,5,activation='relu'))    
+model.add(GlobalMaxPool1D())
+    
+model.add(Dense(256, activation='relu'))
+model.add(Dense(len(unique_y), activation='softmax'))
+    
+model.compile(loss='sparse_categorical_crossentropy', optimizer='rmsprop', metrics=['accuracy'])
+
+model.summary()
+
+history = model.fit(np.array(x_tr),np.array(y_tr),batch_size=128,epochs=75, validation_data=(np.array(x_val),np.array(y_val)),verbose=1, callbacks=[mc])
+# Save best model after each epoch based on min val_loss 
+mc=ModelCheckpoint('best_model.h5', monitor='val_loss', mode='min', save_best_only=True,verbose=1)
+
+
+# plots
+print(history.history.keys())
+# accuracy
+plt.plot(history.history['accuracy'])
+plt.plot(history.history['val_accuracy'])
+plt.title('model accuracy')
+plt.ylabel('accuracy')
+plt.xlabel('epoch')
+plt.legend(['train', 'validation'], loc='upper left')
+plt.show()
+# loss
+plt.plot(history.history['loss'])
+plt.plot(history.history['val_loss'])
+
+
+
+plt.title('model loss')
+plt.ylabel('loss')
+plt.xlabel('epoch')
+plt.legend(['train', 'validation'], loc='upper left')
+plt.show()
+
+
+#loading best model
+from keras.models import load_model
+model = load_model('best_model.h5')
+
+# Prediction by using random note sequence as starting point
+import random
+ind = np.random.randint(0,len(x_val)-1)
+
+random_music = x_val[ind]
+
+predictions=[]
+for i in range(30):
+
+    random_music = random_music.reshape(1,n_ts)
+
+    prob  = model.predict(random_music)[0]
+    y_pred= np.argmax(prob,axis=0)
+    predictions.append(y_pred)
+
+    random_music = np.insert(random_music[0],len(random_music[0]),y_pred)
+    random_music = random_music[1:]
+
+
+#  converting generated ints to notes to form a music file 
+x_int_to_note = dict((number, note_) for number, note_ in enumerate(unique_x)) 
+predicted_notes = [x_int_to_note[i] for i in predictions]
+
+# Covert to a midi format using (piano instrument)
+def convert_to_midi(prediction_output):
+   
+    offset = 0
+    output_notes = []
+
+    # create note and chord objects based on the values generated by the model
+    for pattern in prediction_output:
+        
+        # pattern is a chord
+        if ('.' in pattern) or pattern.isdigit():
+            notes_in_chord = pattern.split('.')
+            notes = []
+            for current_note in notes_in_chord:
+                
+                cn=int(current_note)
+                new_note = note.Note(cn)
+                new_note.storedInstrument = instrument.Piano()
+                notes.append(new_note)
+                
+            new_chord = chord.Chord(notes)
+            new_chord.offset = offset
+            output_notes.append(new_chord)
+            
+        # pattern is a note
+        else:
+            
+            new_note = note.Note(pattern)
+            new_note.offset = offset
+            new_note.storedInstrument = instrument.Piano()
+            output_notes.append(new_note)
+
+        # increase offset each iteration so that notes do not stack
+        offset += 1
+    midi_stream = stream.Stream(output_notes)
+    midi_stream.write('midi', fp='./output/predicted_music.mid')
+
+
+# Save file as music.mid to storage
+convert_to_midi(predicted_notes)
+
+!pip install pretty_midi
+
+import numpy as np
+import matplotlib.pyplot as plt
+from music21 import *
+import glob
+from collections import Counter
+import pretty_midi
+
+sampling_rate = 16
+
+def generate_combine_piano_roll(midi_data, fs, program=None): #Function to generate piano roll format for the input song
+    mat = None
+    for inst in midi_data.instruments:
+        inst.remove_invalid_notes() #removes the invalid notes in the song
+        if inst.is_drum == False and (program is None or inst.program == program):
+            inst_mat = inst.get_piano_roll(fs=fs) 
+            if mat is None:
+                mat = inst_mat
+            elif inst_mat.shape == mat.shape:
+                mat += inst_mat
+            elif inst_mat.shape[1] < mat.shape[1]:
+                inst_mat = np.pad(inst_mat, ((0,0),(0,mat.shape[1]-inst_mat.shape[1])), mode='constant')
+                mat += inst_mat
+            else:
+                mat = np.pad(mat, ((0,0),(0,inst_mat.shape[1] - mat.shape[1])), mode='constant')
+                mat += inst_mat
+    
+    if mat is None:
+        return None
+    
+    mat[mat > 0] = 1
+    return mat.T
+
+
+def plot_pianoroll(FILE):
+    midi_data = pretty_midi.PrettyMIDI(FILE)
+    new_mat = generate_combine_piano_roll(midi_data, sampling_rate)
+    mat= new_mat[:500,:] #changing the time steps to visualize the piano roll format
+    matrix_new = new_mat.sum(axis=0) #To find the unique pitches in the song
+    print("The number of unique pitches in the song:",np.count_nonzero(matrix_new))
+    
+    cax = plt.matshow(mat.T, aspect="auto", vmin=0, vmax=1, cmap="gray_r")
+    plt.gca().invert_yaxis()
+    plt.title('Part of a Song in Piano roll Format')
+    plt.xlabel('Time steps')
+    plt.ylabel('Pitch')
+    plt.savefig('pianoroll.png')
+    plt.show()
+    
+FILE  = './output/predicted_music.mid'
+plot_pianoroll(FILE)
+
+#op
+op  = './output/predicted_music.mid'
+plot_pianoroll(op)
+
+!pip install pygame
+# play midi files in jupyter notebook
+import pygame
+def play_music(midi_filename):
+  '''Stream music_file in a blocking manner'''
+  clock = pygame.time.Clock()
+  pygame.mixer.music.load(midi_filename)
+  pygame.mixer.music.play()
+  while pygame.mixer.music.get_busy():
+    clock.tick(30) # check if playback has finished
+    
+midi_filename = './output/predicted_music.mid'
+
+# mixer config
+freq = 44100  # audio CD quality
+bitsize = -16   # unsigned 16 bit
+channels = 2  # 1 is mono, 2 is stereo
+buffer = 1024   # number of samples
+pygame.mixer.init(freq, bitsize, channels, buffer)
+
+# optional volume 0 to 1.0
+pygame.mixer.music.set_volume(0.8)
+
+# listen for interruptions
+try:
+  # use the midi file you just saved
+  play_music(midi_filename)
+except KeyboardInterrupt:
+  # if user hits Ctrl/C then exit
+  # (works only in console mode)
+  pygame.mixer.music.fadeout(1000)
+  pygame.mixer.music.stop()
+  raise SystemExit
+    
