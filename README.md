@@ -7,3 +7,6 @@ One has create a 'metal_midi' folder in the src folder and copy the .mid files f
 One also needs to create folder 'output' in the src folder
 
 I have added the code for playing the song as well so that one can have a single code to run the music once generated.
+
+
+The best_model.h5 gets automatically generated and referenced in the file.
